@@ -6,7 +6,7 @@ from typing import List, Tuple, AsyncGenerator
 from functools import wraps
 
 class CSVToASCIITable:
-    def __init__(self, file_path: str, max_width: int = 30, max_rows: int = None,
+    def __init__(self, file_path: str, max_width: int = None, max_rows: int = None,
                  align: str = '<', output_file: str = None, dialect: str = 'excel'):
         self.file_path = file_path
         self.max_width = max_width
@@ -31,21 +31,32 @@ class CSVToASCIITable:
                 sys.exit(1)
         return wrapper
 
-    @error_handler
     async def read_csv(self) -> AsyncGenerator[List[str], None]:
-        async with asyncio.open(self.file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
-            reader = csv.reader(content.splitlines(), dialect=self.dialect)
+        with open(self.file_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f, dialect=self.dialect)
             self.headers = next(reader)
             yield self.headers
             for row in reader:
                 yield row
 
-    async def get_max_widths(self, rows: AsyncGenerator[List[str], None]) -> List[int]:
-        widths = [min(self.max_width, len(cell)) for cell in self.headers]
-        async for row in rows:
+    async def get_max_widths(self) -> List[int]:
+        widths = [len(cell) for cell in self.headers]
+        max_columns = len(self.headers)
+        async for row in self.read_csv():
+            max_columns = max(max_columns, len(row))
             for i, cell in enumerate(row):
-                widths[i] = min(self.max_width, max(widths[i], len(cell)))
+                if i >= len(widths):
+                    widths.append(len(cell))
+                else:
+                    widths[i] = max(widths[i], len(cell))
+        
+        # Pad headers if necessary
+        self.headers.extend([''] * (max_columns - len(self.headers)))
+        
+        # Apply max_width if specified
+        if self.max_width:
+            widths = [min(w, self.max_width) for w in widths]
+        
         return widths
 
     @staticmethod
@@ -56,38 +67,41 @@ class CSVToASCIITable:
     def create_row(row: List[str], widths: List[int], align: str = '<') -> str:
         return '|' + '|'.join(f" {cell:{align}{w}} " for cell, w in zip(row, widths)) + '|'
 
-    async def generate_table(self) -> List[str]:
-        rows = self.read_csv()
-        self.widths = await self.get_max_widths(rows)
+    async def generate_table(self) -> AsyncGenerator[str, None]:
+        self.widths = await self.get_max_widths()
         
         separator = self.create_separator(self.widths)
         header_row = self.create_row(self.headers, self.widths, '^')
         
-        output = [separator, header_row, separator]
+        yield separator
+        yield header_row
+        yield separator
         
-        rows = self.read_csv()
-        await anext(rows)  # Skip headers
         i = 0
-        async for row in rows:
+        async for row in self.read_csv():
+            if row == self.headers:
+                continue
             if self.max_rows and i >= self.max_rows:
                 break
-            output.append(self.create_row(row, self.widths, self.align))
+            # Pad row if necessary
+            row.extend([''] * (len(self.widths) - len(row)))
+            yield self.create_row(row, self.widths, self.align)
             i += 1
         
-        output.append(separator)
-        return output
+        yield separator
 
-    async def output_table(self, table: List[str]):
+    async def output_table(self):
         if self.output_file:
-            async with asyncio.open(self.output_file, 'w', encoding='utf-8') as f:
-                await f.write('\n'.join(table))
+            with open(self.output_file, 'w', encoding='utf-8') as f:
+                async for line in self.generate_table():
+                    f.write(line + '\n')
         else:
-            print('\n'.join(table))
+            async for line in self.generate_table():
+                print(line)
 
     @error_handler
     async def run(self):
-        table = await self.generate_table()
-        await self.output_table(table)
+        await self.output_table()
 
 async def main():
     if len(sys.argv) < 2:
@@ -95,7 +109,7 @@ async def main():
         sys.exit(1)
     
     file_path = sys.argv[1]
-    max_width = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    max_width = int(sys.argv[2]) if len(sys.argv) > 2 else None
     max_rows = int(sys.argv[3]) if len(sys.argv) > 3 else None
     align = sys.argv[4] if len(sys.argv) > 4 else '<'
     output_file = sys.argv[5] if len(sys.argv) > 5 else None
